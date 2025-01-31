@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Error};
 use actix_files::Files; // For serving static files
-use calamine::{open_workbook_auto_from_rs, Reader, Sheets};
+use calamine::{open_workbook_auto_from_rs, Reader, Sheets, Data};
 use actix_multipart::Multipart;
 use futures_util::StreamExt;
 use std::path::Path;
@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 use chrono::{Local, NaiveDateTime};
 use std::fs;
+use rayon::prelude::*; // Import Rayon parallel iterators
 
 #[derive(Serialize)]
 struct ApiResponse {
@@ -80,6 +81,8 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
         // let is_zip = files.len() >= 4 && &files[0..4] == b"PK\x03\x04";
         let is_zip = file_extension == "zip";
 
+        let mut zip_buffer = vec![];
+
         if is_zip {
             println!("Detected ZIP file, processing...");
 
@@ -90,7 +93,6 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
             })?;
 
             let mut processed_files = Vec::new();
-
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).map_err(|e| {
                     actix_web::error::ErrorInternalServerError(format!("Failed to read file in ZIP archive: {}", e))
@@ -109,7 +111,7 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
                                 name: output_file.clone(),
                             });
                             *next_id += 1;
-
+                            zip_buffer = zip_files(&[output_file.clone()])?;
                             processed_files.push(output_file);
                         }
                         Err(e) => {
@@ -121,9 +123,9 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
                 }
             }
 
-            return Ok(HttpResponse::Ok().json(ApiResponse {
-                message: format!("ZIP file processed successfully. Processed {} Excel files.", processed_files.len()),
-            }));
+            return Ok(HttpResponse::Ok()
+                .content_type("application/zip")
+                .body(zip_buffer));
         } else if file_extension == "xlsx" || file_extension == "xls" {
             println!("Detected Excel file, processing...");
 
@@ -137,9 +139,10 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
                     });
                     *next_id += 1;
 
-                    return Ok(HttpResponse::Ok().json(ApiResponse {
-                        message: format!("File {} processed successfully", file_name),
-                    }));
+                    zip_buffer = zip_files(&[output_file.clone()])?;
+                    return Ok(HttpResponse::Ok()
+                        .content_type("application/zip")
+                        .body(zip_buffer));
                 }
                 Err(e) => {
                     eprintln!("Failed to process file: {}", e);
@@ -212,8 +215,62 @@ async fn get_files(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(file_list))
 }
 
-// Process Excel files
 fn process_excel_files(file_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let cursor = Cursor::new(file_data);
+
+    // Use `open_workbook_auto_from_rs` to read from an in-memory buffer
+    let mut workbook: calamine::Sheets<_> = calamine::open_workbook_auto_from_rs(cursor)?;
+
+    // Read the first sheet
+    let sheet_name = workbook.sheet_names()[0].clone();
+    let range = workbook.worksheet_range(&sheet_name)?;
+
+    // Create a new output Excel file
+    let output_dir = output_directory("output_files");
+    let output_file = format!("{}/firstsheet{}.xlsx", output_dir, Local::now().format("%m%d%y%H%M%S"));
+    let workbook = Workbook::new(&output_file)?;
+    let mut sheet = workbook.add_worksheet(None)?;
+
+    // Convert rows to a Vec for parallel processing
+    // Convert to vector for Rayon parallel iteration
+    let rows: Vec<_> = range.rows().enumerate().collect();
+
+    // Use parallel iteration to process the rows
+    let data: Vec<(usize, usize, String)> = rows
+        .into_par_iter()
+        .flat_map(|(row_idx, row)| {
+            row.iter()
+                .enumerate()
+                .filter_map(move |(col_idx, cell)| {
+                    match cell {
+                        Data::String(s) => Some((row_idx, col_idx, s.clone())), // Keep string as is
+                        Data::Float(f) => Some((row_idx, col_idx, f.to_string())), // Convert float to string
+                        Data::Int(i) => Some((row_idx, col_idx, i.to_string())), // Convert integer to string
+                        Data::Bool(b) => Some((row_idx, col_idx, if *b { "TRUE".to_string() } else { "FALSE".to_string() })), // Convert bool to string
+                        Data::DateTime(d) => d.as_datetime().map(|naive_dt| {
+                            (row_idx, col_idx, naive_dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        }), // Format datetime
+                        Data::Error(e) => Some((row_idx, col_idx, format!("Error: {:?}", e))), // Handle errors
+                        Data::Empty => None, // Skip empty cells
+                        _ => None
+                    }
+                })
+                .collect::<Vec<_>>() // Collect within flat_map
+        })
+        .collect();
+
+    // Sequentially write the collected data
+    for (row_idx, col_idx, cell) in data {
+        sheet.write_string(row_idx as u32, col_idx as u16, &cell, None)?;
+    }
+
+    workbook.close()?;
+    Ok(output_file)
+}
+
+
+// Process Excel files
+fn process_excel_files_(file_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let cursor = Cursor::new(file_data);
 
     // Use `open_workbook_auto_from_rs` to read from an in-memory buffer

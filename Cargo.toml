@@ -16,3 +16,4 @@ futures = "0.3.31" # For async streams
 serde = { version = "1.0.217", features = ["derive"] } # For JSON serialization
 serde_json = "1.0.138"
 futures-util = "0.3.31" # For JSON responses
+rayon = "1.10.0"
