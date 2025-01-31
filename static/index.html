@@ -115,6 +115,7 @@
 </div>
 
 <script>
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     // Function to add Excel files
     function addExcel() {
         const input = document.createElement('input');
@@ -132,21 +133,30 @@
     function addFolder() {
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = '.zip';
-        input.onchange = (e) => {
+        input.webkitdirectory = true;  // Enables folder selection
+        input.multiple = true;
+        input.onchange = async (e) => {
             const files = e.target.files;
-            uploadFiles(files, 'folder');
+            if (files.length !== 0) {
+                for (const file of files) {
+                    await sleep(1000);
+                    await uploadFiles([file], 'folder');
+                }
+            }
         };
+
         input.click();
     }
+
 
     // Function to add a ZIP file
     function addZip() {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.zip';
-        input.onchange = (e) => {
+        input.onchange = async (e) => {
             const files = e.target.files;
+            await sleep(1000);
             uploadFiles(files, 'zip');
         };
         input.click();
@@ -166,7 +176,7 @@
             });
 
             if (response.ok) {
-                alert(`${type} files uploaded successfully!`);
+                //alert(`${type} files uploaded successfully!`);
                 // Refresh the file list
                 fetchFiles();
             } else {
