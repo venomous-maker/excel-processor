@@ -1,21 +1,19 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Error};
 use actix_files::Files; // For serving static files
-use calamine::{open_workbook_auto_from_rs, Reader, Sheets, Data};
+use calamine::{open_workbook_auto_from_rs, Reader, Data};
 use actix_multipart::Multipart;
 use futures_util::StreamExt;
 use std::path::Path;
 use xlsxwriter::*;
 use zip::{ZipArchive, ZipWriter};
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
-// use futures::StreamExt;
+use std::io::{Cursor, Read};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::collections::HashMap;
-use chrono::{Local, NaiveDateTime};
+use chrono::{Local};
 use std::fs;
 use rayon::prelude::*; // Import Rayon parallel iterators
-
 
 #[derive(Serialize, Clone)]
 struct SearchResult {
@@ -41,6 +39,11 @@ struct SearchQuery {
     query: String,
 }
 
+#[derive(Deserialize, Clone)]
+struct ReplaceRequest {
+    search: String,
+    replace: String,
+}
 
 // In-memory storage for files (for demonstration purposes)
 struct AppState {
@@ -48,7 +51,7 @@ struct AppState {
     next_id: Mutex<usize>,
 }
 
-fn output_directory(dir_path: &str) -> & str {
+fn output_directory(dir_path: &str) -> &str {
     // Use default directory if dir_path is empty
     let path = if dir_path.is_empty() {
         "output_files"
@@ -66,6 +69,9 @@ fn output_directory(dir_path: &str) -> & str {
 
 // Handler for uploading and processing Excel files
 async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Result<HttpResponse, Error> {
+    let _files: Vec<u8> = Vec::new();
+
+    // Read the uploaded files
     while let Some(field) = payload.next().await {
         let mut field = field?;
         let content_disposition = field.content_disposition();
@@ -179,13 +185,185 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
     }))
 }
 
+// Handler for find and replace
+async fn find_and_replace(
+    replace_request: web::Query<ReplaceRequest>,
+    data: web::Data<AppState>,
+) -> Result<HttpResponse, Error> {
+    let search = &replace_request.search;
+    let replace = &replace_request.replace;
+
+    let files_map = data.files.lock().unwrap();
+    let mut updated_files = Vec::new();
+
+    for file_info in files_map.values() {
+        let file_path = &file_info.name;
+        let file_data = std::fs::read(file_path).map_err(|e| {
+            actix_web::error::ErrorInternalServerError(format!("Failed to read file: {}", e))
+        })?;
+
+        let cursor = Cursor::new(file_data);
+        let mut workbook = match open_workbook_auto_from_rs(cursor) {
+            Ok(wb) => wb,
+            Err(e) => {
+                return Err(actix_web::error::ErrorInternalServerError(format!(
+                    "Failed to open workbook: {}",
+                    e
+                )));
+            }
+        };
+
+        // Iterate over each sheet and perform find and replace
+        for sheet_name in workbook.sheet_names().to_owned() {
+            match workbook.worksheet_range(&sheet_name) {
+                Ok(range) => {
+                    let mut updated_rows = Vec::new();
+
+                    for row in range.rows() {
+                        let updated_cells: Vec<Data> = row
+                            .iter()
+                            .map(|cell| {
+                                match cell {
+                                    Data::String(s) => {
+                                        if s.contains(search) {
+                                            Data::String(s.replace(search, replace))
+                                        } else {
+                                            cell.clone()
+                                        }
+                                    }
+                                    _ => cell.clone(),
+                                }
+                            })
+                            .collect();
+
+                        updated_rows.push(updated_cells);
+                    }
+
+                    // Write the updated data back to the sheet
+                    let output_file = format!("{}", file_path);
+                    let workbook = Workbook::new(&output_file).map_err(|e| {
+                        actix_web::error::ErrorInternalServerError(format!(
+                            "Failed to create workbook: {}", e
+                        ))
+                    })?;
+                    let mut sheet = workbook.add_worksheet(None).map_err(|e| {
+                        actix_web::error::ErrorInternalServerError(format!(
+                            "Failed to add worksheet: {}", e
+                        ))
+                    })?;
+
+                    for (row_idx, row) in updated_rows.iter().enumerate() {
+                        for (col_idx, cell) in row.iter().enumerate() {
+                            let result = match cell {
+                                Data::String(s) => sheet.write_string(row_idx as u32, col_idx as u16, s, None),
+                                Data::Float(f) => sheet.write_number(row_idx as u32, col_idx as u16, *f, None),
+                                Data::Int(i) => sheet.write_number(row_idx as u32, col_idx as u16, *i as f64, None),
+                                Data::Bool(b) => sheet.write_boolean(row_idx as u32, col_idx as u16, *b, None),
+                                Data::DateTime(d) => {
+                                    if let Some(naive_dt) = d.as_datetime() {
+                                        let formatted_date = naive_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                                        sheet.write_string(row_idx as u32, col_idx as u16, &formatted_date, None)
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                                Data::Error(e) => sheet.write_string(row_idx as u32, col_idx as u16, &format!("Error: {:?}", e), None),
+                                Data::Empty => Ok(()),
+                                _ => Ok(()),
+                            };
+
+                            // Map the error to Actix-friendly error if it occurs
+                            result.map_err(|e| {
+                                actix_web::error::ErrorInternalServerError(format!("Write error: {}", e))
+                            })?;
+                        }
+                    }
+
+                    workbook.close().map_err(|e| {
+                        actix_web::error::ErrorInternalServerError(format!("Failed to close workbook: {}", e))
+                    })?;
+                    updated_files.push(output_file);
+                }
+                Err(e) => {
+                    eprintln!("Error reading range for sheet '{}': {}", sheet_name, e);
+                    continue;
+                }
+            }
+        }
+    }
+
+    if updated_files.is_empty() {
+        Ok(HttpResponse::Ok().json(ApiResponse {
+            message: "No files updated".to_string(),
+        }))
+    } else {
+        Ok(HttpResponse::Ok().json(ApiResponse {
+            message: format!("Updated {} files", updated_files.len()),
+        }))
+    }
+}
+
+
+// Handler for deleting a file
+async fn delete_file(data: web::Data<AppState>, index: web::Path<usize>) -> Result<HttpResponse, Error> {
+    let mut files_map = data.files.lock().unwrap();
+
+    // Check if the file exists in the in-memory storage
+    if let Some(file_info) = files_map.remove(&index) {
+        // Delete the file from the filesystem
+        if fs::remove_file(&file_info.name).is_ok() {
+            Ok(HttpResponse::Ok().json(ApiResponse {
+                message: "File deleted successfully".to_string(),
+            }))
+        } else {
+            // If file deletion fails, reinsert the file into the in-memory storage
+            files_map.insert(index.into_inner(), file_info);
+            Ok(HttpResponse::InternalServerError().json(ApiResponse {
+                message: "Failed to delete file from the filesystem".to_string(),
+            }))
+        }
+    } else {
+        Ok(HttpResponse::NotFound().json(ApiResponse {
+            message: "File not found".to_string(),
+        }))
+    }
+}
+
+// Handler for fetching the list of files
+async fn get_files(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
+    let mut files_map = data.files.lock().unwrap();
+    let mut file_list: Vec<FileInfo> = files_map.values().cloned().collect();
+
+    let output_dir = output_directory("output_files");
+    if let Ok(entries) = fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    let file_name = output_dir.to_string() + "/" + &*entry.file_name().into_string().unwrap();
+                    let exists = file_list.iter().any(|f| f.name == file_name);
+                    if !exists {
+                        file_list.push(FileInfo { name: file_name.clone() });
+
+                        // Add to in-memory storage for consistency
+                        let mut next_id = data.next_id.lock().unwrap();
+                        files_map.insert(*next_id, FileInfo { name: file_name });
+                        *next_id += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(file_list))
+}
+
 // Corrected search_files function
 async fn search_files(
     query: web::Query<SearchQuery>,
     data: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
     let query = &query.query; // Extract the query string
-    let mut files_map = data.files.lock().unwrap();
+    let files_map = data.files.lock().unwrap();
     let mut results = Vec::new();
 
     for file_info in files_map.values() {
@@ -254,71 +432,13 @@ async fn search_files(
         }
     }
 
-    if results.is_empty() {
-        Ok(HttpResponse::Ok().json("No results found".to_string()))
-    } else {
-        Ok(HttpResponse::Ok().json(serde_json::json!({
+    Ok(HttpResponse::Ok().json(serde_json::json!({
         "data": results,
         "count": results.len()
         })))
-    }
 }
 
-
-
-// Handler for deleting a file
-async fn delete_file(data: web::Data<AppState>, index: web::Path<usize>) -> Result<HttpResponse, Error> {
-    let mut files_map = data.files.lock().unwrap();
-
-    // Check if the file exists in the in-memory storage
-    if let Some(file_info) = files_map.remove(&index) {
-        // Delete the file from the filesystem
-        if fs::remove_file(&file_info.name).is_ok() {
-            Ok(HttpResponse::Ok().json(ApiResponse {
-                message: "File deleted successfully".to_string(),
-            }))
-        } else {
-            // If file deletion fails, reinsert the file into the in-memory storage
-            files_map.insert(index.into_inner(), file_info);
-            Ok(HttpResponse::InternalServerError().json(ApiResponse {
-                message: "Failed to delete file from the filesystem".to_string(),
-            }))
-        }
-    } else {
-        Ok(HttpResponse::NotFound().json(ApiResponse {
-            message: "File not found".to_string(),
-        }))
-    }
-}
-
-// Handler for fetching the list of files
-async fn get_files(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
-    let mut files_map = data.files.lock().unwrap();
-    let mut file_list: Vec<FileInfo> = files_map.values().cloned().collect();
-
-    let output_dir = output_directory("output_files");
-    if let Ok(entries) = fs::read_dir(output_dir) {
-        for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    let file_name = output_dir.to_string()+"/"+ &*entry.file_name().into_string().unwrap();
-                    let exists = file_list.iter().any(|f| f.name == file_name);
-                    if !exists {
-                        file_list.push(FileInfo { name: file_name.clone() });
-
-                        // Add to in-memory storage for consistency
-                        let mut next_id = data.next_id.lock().unwrap();
-                        files_map.insert(*next_id, FileInfo { name: file_name });
-                        *next_id += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(HttpResponse::Ok().json(file_list))
-}
-
+// Process Excel files
 fn process_excel_files(file_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let cursor = Cursor::new(file_data);
 
@@ -336,7 +456,6 @@ fn process_excel_files(file_data: &[u8]) -> Result<String, Box<dyn std::error::E
     let mut sheet = workbook.add_worksheet(None)?;
 
     // Convert rows to a Vec for parallel processing
-    // Convert to vector for Rayon parallel iteration
     let rows: Vec<_> = range.rows().enumerate().collect();
 
     // Use parallel iteration to process the rows
@@ -347,82 +466,25 @@ fn process_excel_files(file_data: &[u8]) -> Result<String, Box<dyn std::error::E
                 .enumerate()
                 .filter_map(move |(col_idx, cell)| {
                     match cell {
-                        Data::String(s) => Some((row_idx, col_idx, s.clone())), // Keep string as is
-                        Data::Float(f) => Some((row_idx, col_idx, f.to_string())), // Convert float to string
-                        Data::Int(i) => Some((row_idx, col_idx, i.to_string())), // Convert integer to string
-                        Data::Bool(b) => Some((row_idx, col_idx, if *b { "TRUE".to_string() } else { "FALSE".to_string() })), // Convert bool to string
+                        Data::String(s) => Some((row_idx, col_idx, s.clone())),
+                        Data::Float(f) => Some((row_idx, col_idx, f.to_string())),
+                        Data::Int(i) => Some((row_idx, col_idx, i.to_string())),
+                        Data::Bool(b) => Some((row_idx, col_idx, if *b { "TRUE".to_string() } else { "FALSE".to_string() })),
                         Data::DateTime(d) => d.as_datetime().map(|naive_dt| {
                             (row_idx, col_idx, naive_dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        }), // Format datetime
-                        Data::Error(e) => Some((row_idx, col_idx, format!("Error: {:?}", e))), // Handle errors
-                        Data::Empty => None, // Skip empty cells
-                        _ => None
+                        }),
+                        Data::Error(e) => Some((row_idx, col_idx, format!("Error: {:?}", e))),
+                        Data::Empty => None,
+                        _ => None,
                     }
                 })
-                .collect::<Vec<_>>() // Collect within flat_map
+                .collect::<Vec<_>>()
         })
         .collect();
 
     // Sequentially write the collected data
     for (row_idx, col_idx, cell) in data {
         sheet.write_string(row_idx as u32, col_idx as u16, &cell, None)?;
-    }
-
-    workbook.close()?;
-    Ok(output_file)
-}
-
-
-// Process Excel files
-fn process_excel_files_(file_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    let cursor = Cursor::new(file_data);
-
-    // Use `open_workbook_auto_from_rs` to read from an in-memory buffer
-    let mut workbook: Sheets<_> = open_workbook_auto_from_rs(cursor)?;
-
-    // Read the first sheet
-    let sheet_name = workbook.sheet_names()[0].clone();
-    let range = workbook.worksheet_range(&sheet_name)?;
-
-    // Create a new output Excel file
-    let output_dir = output_directory("output_files");
-    let output_file = format!("{}/firstsheet{}.xlsx", output_dir, Local::now().format("%m%d%y%H%M%S"));
-    let workbook = Workbook::new(&output_file)?;
-    let mut sheet = workbook.add_worksheet(None)?;
-
-    // Write data to the output file
-    for (row_idx, row) in range.rows().enumerate() {
-        for (col_idx, cell) in row.iter().enumerate() {
-            match cell {
-                calamine::Data::String(s) => {
-                    let cleaned = s.replace(" ", ""); // Remove spaces
-                    sheet.write_string(row_idx as u32, col_idx as u16, &cleaned, None)?;
-                }
-                calamine::Data::Float(f) => {
-                    sheet.write_number(row_idx as u32, col_idx as u16, *f, None)?;
-                }
-                calamine::Data::Int(i) => {
-                    sheet.write_number(row_idx as u32, col_idx as u16, *i as f64, None)?;
-                }
-                calamine::Data::Bool(b) => {
-                    let bool_text = if *b { "TRUE" } else { "FALSE" };
-                    sheet.write_string(row_idx as u32, col_idx as u16, bool_text, None)?;
-                }
-                calamine::Data::DateTime(d) => {
-                    if let Some(naive_dt) = d.as_datetime() {
-                        let formatted_date = naive_dt.format("%Y-%m-%d %H:%M:%S").to_string();
-                        sheet.write_string(row_idx as u32, col_idx as u16, &formatted_date, None)?;
-                    }
-                }
-                calamine::Data::Error(e) => {
-                    sheet.write_string(row_idx as u32, col_idx as u16, &format!("Error: {:?}", e), None)?;
-                }
-                calamine::Data::Empty => {
-                    // Leave the cell empty
-                }
-                _ => {}
-            }
-        }
     }
 
     workbook.close()?;
@@ -464,6 +526,8 @@ async fn main() -> std::io::Result<()> {
             // API endpoint for fetching the list of files
             .route("/files", web::get().to(get_files))
             .route("/search", web::get().to(search_files)) // Add the search endpoint
+            // API endpoint for find and replace
+            .route("/replace", web::get().to(find_and_replace))
             // Serve static files from the "static" directory
             .service(Files::new("/", "./static").index_file("index.html"))
     })

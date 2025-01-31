@@ -67,10 +67,12 @@
         <input type="text" placeholder="Search..." oninput="filterFiles()">
     </div>
     <div>
-        <span>Nike</span>
-        <span>54,279 results</span>
-        <span>Puma</span>
-        <button onclick="replace()">Replace</button>
+        <div class="buttons">
+            <button onclick="await search('Nike')">Nike</button>
+            <span id="counter">0 results</span>
+            <button onclick="await search('Puma')">Puma</button>
+            <button onclick="replace()">Replace</button>
+        </div>
     </div>
 </div>
 
@@ -85,37 +87,14 @@
         </tr>
         </thead>
         <tbody id="file-table">
-        <tr>
-            <td>0</td>
-            <td>20240929-20240930.xlsx</td>
-            <td class="delete-btn" onclick="deleteFile(0)">Delete</td>
-        </tr>
-        <tr>
-            <td>1</td>
-            <td>20240922-20240928.xlsx</td>
-            <td class="delete-btn" onclick="deleteFile(1)">Delete</td>
-        </tr>
-        <tr>
-            <td>2</td>
-            <td>20240915-20240921.xlsx</td>
-            <td class="delete-btn" onclick="deleteFile(2)">Delete</td>
-        </tr>
-        <tr>
-            <td>3</td>
-            <td>20240908-20240914.xlsx</td>
-            <td class="delete-btn" onclick="deleteFile(3)">Delete</td>
-        </tr>
-        <tr>
-            <td>4</td>
-            <td>20240901-20240907.xlsx</td>
-            <td class="delete-btn" onclick="deleteFile(4)">Delete</td>
-        </tr>
+
         </tbody>
     </table>
 </div>
 
 <script>
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let currentQuery = '';
     // Function to add Excel files
     function addExcel() {
         const input = document.createElement('input');
@@ -219,10 +198,47 @@
         }
     }
 
+    async function search(query) {
+        currentQuery = query;
+            try {
+                const response = await fetch(`/search?query=${query}`, {
+                    method: 'GET',
+                });
+
+                let data = await response.json();
+
+                if (response.ok) {
+                    console.log(response);
+                    document.getElementById('counter').textContent = data.count+' results';
+                } else {
+                    alert('Error searching in the file. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('An error occurred while searching in the file.');
+            }
+    }
+
     // Function to replace files
-    function replace() {
-        alert('Replace functionality');
+    async function replace() {
         // Implement the replace logic here
+
+        if(confirm('Are you sure you want to replace the files?')){
+            try {
+                const response = await fetch(`/replace?search=${currentQuery}&replace=${''}`, {
+                    method: 'GET',
+                });
+
+                if (response.ok) {
+                    alert('Files replaced successfully!');
+                } else {
+                    alert('Error replacing in the file. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('An error occurred while replacing in the file.');
+            }
+        }
     }
 
     // Function to filter files based on search input
