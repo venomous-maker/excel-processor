@@ -9,7 +9,7 @@ use zip::{ZipArchive, ZipWriter};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 // use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::collections::HashMap;
 use chrono::{Local, NaiveDateTime};
@@ -23,6 +23,7 @@ struct SearchResult {
     row: usize,
     col: usize,
     value: String,
+    file: String,
 }
 
 #[derive(Serialize)]
@@ -34,6 +35,12 @@ struct ApiResponse {
 struct FileInfo {
     name: String,
 }
+
+#[derive(Deserialize, Clone)]
+struct SearchQuery {
+    query: String,
+}
+
 
 // In-memory storage for files (for demonstration purposes)
 struct AppState {
@@ -174,16 +181,16 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
 
 // Corrected search_files function
 async fn search_files(
-    query: web::Query<String>,
+    query: web::Query<SearchQuery>,
     data: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
-    let query = query.into_inner(); // Extract the query string
+    let query = &query.query; // Extract the query string
     let mut files_map = data.files.lock().unwrap();
     let mut results = Vec::new();
 
     for file_info in files_map.values() {
-        let file_path = &file_info.name;
-
+        let file_path = "".to_owned() + &*file_info.name.clone(); // Simulated file path
+        println!("Searching file: {}", file_path);
         // Read and process each file
         let file_data = std::fs::read(file_path).map_err(|e| {
             actix_web::error::ErrorInternalServerError(format!("Failed to read file: {}", e))
@@ -226,12 +233,13 @@ async fn search_files(
                             };
 
                             // Check if the cell value contains the query string
-                            if cell_value.contains(&query) {
+                            if cell_value.contains(&*query) {
                                 results.push(SearchResult {
                                     sheet_name: sheet_name.clone(),
                                     row: row_idx,
                                     col: col_idx,
                                     value: cell_value.clone(),
+                                    file: file_info.name.clone(),
                                 });
                             }
                         }
@@ -247,13 +255,15 @@ async fn search_files(
     }
 
     if results.is_empty() {
-        Ok(HttpResponse::Ok().json(ApiResponse {
-            message: "No results found".to_string(),
-        }))
+        Ok(HttpResponse::Ok().json("No results found".to_string()))
     } else {
-        Ok(HttpResponse::Ok().json(results))
+        Ok(HttpResponse::Ok().json(serde_json::json!({
+        "data": results,
+        "count": results.len()
+        })))
     }
 }
+
 
 
 // Handler for deleting a file
