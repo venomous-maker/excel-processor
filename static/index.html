@@ -122,9 +122,9 @@
         input.type = 'file';
         input.accept = '.xlsx, .xls';
         input.multiple = true;
-        input.onchange = (e) => {
+        input.onchange = async (e) => {
             const files = e.target.files;
-            uploadFiles(files, 'excel');
+            await uploadFiles(files, 'excel');
         };
         input.click();
     }
@@ -157,7 +157,7 @@
         input.onchange = async (e) => {
             const files = e.target.files;
             await sleep(1000);
-            uploadFiles(files, 'zip');
+            await uploadFiles(files, 'zip');
         };
         input.click();
     }
