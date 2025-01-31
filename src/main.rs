@@ -1,12 +1,14 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Error};
 use actix_files::Files; // For serving static files
 use calamine::{open_workbook_auto_from_rs, Reader, Sheets};
+use actix_multipart::Multipart;
+use futures_util::StreamExt;
+use std::path::Path;
 use xlsxwriter::*;
 use zip::{ZipArchive, ZipWriter};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
-use futures::StreamExt;
+// use futures::StreamExt;
 use serde::Serialize;
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -46,91 +48,116 @@ fn output_directory(dir_path: &str) -> & str {
 }
 
 // Handler for uploading and processing Excel files
-async fn upload_files(mut payload: web::Payload, data: web::Data<AppState>) -> Result<HttpResponse, Error> {
-    let mut files = Vec::new();
+async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Result<HttpResponse, Error> {
+    while let Some(field) = payload.next().await {
+        let mut field = field?;
+        let content_disposition = field.content_disposition();
 
-    // Read the uploaded files
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk?;
-        files.extend_from_slice(&chunk);
-    }
+        // Extract filename from content disposition header
+        let file_name = content_disposition
+            .unwrap().get_filename()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| "unknown_file".to_string());
 
-    // Check if the uploaded file is a ZIP file based on extension
-    let is_zip = match String::from_utf8(files.clone()) {
-        Ok(file_content) => file_content.ends_with(".zip"), // Check if the file has a .zip extension
-        Err(_) => false, // Handle invalid UTF-8 content
-    };
+        // Extract file extension
+        let file_extension = Path::new(&file_name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_string();
 
-    if is_zip {
-        // Unzip the files and process each file
-        let cursor = Cursor::new(files);
-        let mut archive = ZipArchive::new(cursor).map_err(|e| {
-            actix_web::error::ErrorInternalServerError(format!("Failed to open ZIP archive: {}", e))
-        })?;
+        let mut files = Vec::new();
 
-        let mut processed_files = Vec::new();
+        // Read the file content
+        while let Some(chunk) = field.next().await {
+            let chunk = chunk?;
+            files.extend_from_slice(&chunk);
+        }
 
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| {
-                actix_web::error::ErrorInternalServerError(format!("Failed to read file in ZIP archive: {}", e))
+        // Log filename and extension
+        println!("Uploaded file: {} (Extension: {})", file_name, file_extension);
+
+        // let is_zip = files.len() >= 4 && &files[0..4] == b"PK\x03\x04";
+        let is_zip = file_extension == "zip";
+
+        if is_zip {
+            println!("Detected ZIP file, processing...");
+
+            // Handle ZIP file processing
+            let cursor = Cursor::new(files);
+            let mut archive = ZipArchive::new(cursor).map_err(|e| {
+                actix_web::error::ErrorInternalServerError(format!("Failed to open ZIP archive: {}", e))
             })?;
-            let file_name = file.name().to_string();
 
-            // Check if the file is an Excel file
-            if file_name.ends_with(".xlsx") || file_name.ends_with(".xls") {
-                // Read the file content
-                let mut file_data = Vec::new();
-                file.read_to_end(&mut file_data)?;
+            let mut processed_files = Vec::new();
 
-                // Process the file
-                match process_excel_files(&file_data) {
-                    Ok(output_file) => {
-                        // Add the processed file to the in-memory storage
-                        let mut files_map = data.files.lock().unwrap();
-                        let mut next_id = data.next_id.lock().unwrap();
-                        files_map.insert(*next_id, FileInfo {
-                            name: output_file.clone(),
-                        });
-                        *next_id += 1;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i).map_err(|e| {
+                    actix_web::error::ErrorInternalServerError(format!("Failed to read file in ZIP archive: {}", e))
+                })?;
+                let file_name = file.name().to_string();
 
-                        processed_files.push(output_file);
+                if file_name.ends_with(".xlsx") || file_name.ends_with(".xls") {
+                    let mut file_data = Vec::new();
+                    file.read_to_end(&mut file_data)?;
+
+                    match process_excel_files(&file_data) {
+                        Ok(output_file) => {
+                            let mut files_map = data.files.lock().unwrap();
+                            let mut next_id = data.next_id.lock().unwrap();
+                            files_map.insert(*next_id, FileInfo {
+                                name: output_file.clone(),
+                            });
+                            *next_id += 1;
+
+                            processed_files.push(output_file);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to process file {}: {}", file_name, e);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to process file {}: {}", file_name, e);
-                    }
+                } else {
+                    eprintln!("Skipping non-Excel file: {}", file_name);
                 }
-            } else {
-                eprintln!("Skipping non-Excel file: {}", file_name);
             }
-        }
 
-        Ok(HttpResponse::Ok().json(ApiResponse {
-            message: format!("ZIP file processed successfully. Processed {} Excel files.", processed_files.len()),
-        }))
-    } else {
-        // Process a single Excel file
-        match process_excel_files(&files) {
-            Ok(output_file) => {
-                // Add the file to the in-memory storage
-                let mut files_map = data.files.lock().unwrap();
-                let mut next_id = data.next_id.lock().unwrap();
-                files_map.insert(*next_id, FileInfo {
-                    name: output_file.clone(),
-                });
-                *next_id += 1;
+            return Ok(HttpResponse::Ok().json(ApiResponse {
+                message: format!("ZIP file processed successfully. Processed {} Excel files.", processed_files.len()),
+            }));
+        } else if file_extension == "xlsx" || file_extension == "xls" {
+            println!("Detected Excel file, processing...");
 
-                Ok(HttpResponse::Ok().json(ApiResponse {
-                    message: "File processed successfully".to_string(),
-                }))
+            // Process non-ZIP Excel file
+            match process_excel_files(&files) {
+                Ok(output_file) => {
+                    let mut files_map = data.files.lock().unwrap();
+                    let mut next_id = data.next_id.lock().unwrap();
+                    files_map.insert(*next_id, FileInfo {
+                        name: output_file.clone(),
+                    });
+                    *next_id += 1;
+
+                    return Ok(HttpResponse::Ok().json(ApiResponse {
+                        message: format!("File {} processed successfully", file_name),
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("Failed to process file: {}", e);
+                    return Ok(HttpResponse::BadRequest().json(ApiResponse {
+                        message: format!("Failed to process file: {}", e),
+                    }));
+                }
             }
-            Err(e) => {
-                eprintln!("Non zip Failed to process file: {}", e);
-                Ok(HttpResponse::BadRequest().json(ApiResponse {
-                    message: format!("Non zip Failed to process file: {}", e),
-                }))
-            }
+        } else {
+            return Ok(HttpResponse::BadRequest().json(ApiResponse {
+                message: format!("Unsupported file type: {}", file_extension),
+            }));
         }
     }
+
+    Ok(HttpResponse::BadRequest().json(ApiResponse {
+        message: "No files uploaded".to_string(),
+    }))
 }
 // Handler for deleting a file
 async fn delete_file(data: web::Data<AppState>, index: web::Path<usize>) -> Result<HttpResponse, Error> {
@@ -159,9 +186,30 @@ async fn delete_file(data: web::Data<AppState>, index: web::Path<usize>) -> Resu
 
 // Handler for fetching the list of files
 async fn get_files(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
-    let files_map = data.files.lock().unwrap();
-    let files: Vec<FileInfo> = files_map.values().cloned().collect();
-    Ok(HttpResponse::Ok().json(files))
+    let mut files_map = data.files.lock().unwrap();
+    let mut file_list: Vec<FileInfo> = files_map.values().cloned().collect();
+
+    let output_dir = output_directory("output_files");
+    if let Ok(entries) = fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    let file_name = output_dir.to_string()+"/"+ &*entry.file_name().into_string().unwrap();
+                    let exists = file_list.iter().any(|f| f.name == file_name);
+                    if !exists {
+                        file_list.push(FileInfo { name: file_name.clone() });
+
+                        // Add to in-memory storage for consistency
+                        let mut next_id = data.next_id.lock().unwrap();
+                        files_map.insert(*next_id, FileInfo { name: file_name });
+                        *next_id += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(file_list))
 }
 
 // Process Excel files
