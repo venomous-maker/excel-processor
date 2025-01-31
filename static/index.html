@@ -124,7 +124,12 @@
         input.multiple = true;
         input.onchange = async (e) => {
             const files = e.target.files;
-            await uploadFiles(files, 'excel');
+            if (files.length !== 0) {
+                for (const file of files) {
+                    await sleep(1000);
+                    await uploadFiles([file], 'excel');
+                }
+            }
         };
         input.click();
     }
@@ -156,8 +161,12 @@
         input.accept = '.zip';
         input.onchange = async (e) => {
             const files = e.target.files;
-            await sleep(1000);
-            await uploadFiles(files, 'zip');
+            if (files.length !== 0) {
+                for (const file of files) {
+                    await sleep(1000);
+                    await uploadFiles([file], 'zip');
+                }
+            }
         };
         input.click();
     }

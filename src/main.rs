@@ -16,6 +16,15 @@ use chrono::{Local, NaiveDateTime};
 use std::fs;
 use rayon::prelude::*; // Import Rayon parallel iterators
 
+
+#[derive(Serialize, Clone)]
+struct SearchResult {
+    sheet_name: String,
+    row: usize,
+    col: usize,
+    value: String,
+}
+
 #[derive(Serialize)]
 struct ApiResponse {
     message: String,
@@ -162,6 +171,91 @@ async fn upload_files(mut payload: Multipart, data: web::Data<AppState>) -> Resu
         message: "No files uploaded".to_string(),
     }))
 }
+
+// Corrected search_files function
+async fn search_files(
+    query: web::Query<String>,
+    data: web::Data<AppState>,
+) -> Result<HttpResponse, Error> {
+    let query = query.into_inner(); // Extract the query string
+    let mut files_map = data.files.lock().unwrap();
+    let mut results = Vec::new();
+
+    for file_info in files_map.values() {
+        let file_path = &file_info.name;
+
+        // Read and process each file
+        let file_data = std::fs::read(file_path).map_err(|e| {
+            actix_web::error::ErrorInternalServerError(format!("Failed to read file: {}", e))
+        })?;
+
+        let cursor = Cursor::new(file_data);
+
+        // Explicitly handle calamine::Error and convert it to actix_web::Error
+        let mut workbook = match open_workbook_auto_from_rs(cursor) {
+            Ok(wb) => wb,
+            Err(e) => {
+                return Err(actix_web::error::ErrorInternalServerError(format!(
+                    "Failed to open workbook: {}",
+                    e
+                )));
+            }
+        };
+
+        // Iterate over each sheet and search for the query string
+        for sheet_name in workbook.sheet_names().to_owned() {
+            // Handle Result explicitly instead of expecting Option
+            match workbook.worksheet_range(&sheet_name) {
+                Ok(range) => {
+                    for (row_idx, row) in range.rows().enumerate() {
+                        for (col_idx, cell) in row.iter().enumerate() {
+                            // Search for matching data
+                            let cell_value = match cell {
+                                calamine::Data::String(s) => s.clone(),
+                                calamine::Data::Float(f) => f.to_string(),
+                                calamine::Data::Int(i) => i.to_string(),
+                                calamine::Data::Bool(b) => {
+                                    if *b {
+                                        "TRUE".to_string()
+                                    } else {
+                                        "FALSE".to_string()
+                                    }
+                                }
+                                calamine::Data::DateTime(d) => d.to_string(),
+                                _ => "".to_string(),
+                            };
+
+                            // Check if the cell value contains the query string
+                            if cell_value.contains(&query) {
+                                results.push(SearchResult {
+                                    sheet_name: sheet_name.clone(),
+                                    row: row_idx,
+                                    col: col_idx,
+                                    value: cell_value.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log/skip sheets with errors (optional)
+                    eprintln!("Error reading range for sheet '{}': {}", sheet_name, e);
+                    continue;
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        Ok(HttpResponse::Ok().json(ApiResponse {
+            message: "No results found".to_string(),
+        }))
+    } else {
+        Ok(HttpResponse::Ok().json(results))
+    }
+}
+
+
 // Handler for deleting a file
 async fn delete_file(data: web::Data<AppState>, index: web::Path<usize>) -> Result<HttpResponse, Error> {
     let mut files_map = data.files.lock().unwrap();
@@ -359,6 +453,7 @@ async fn main() -> std::io::Result<()> {
             .route("/delete/{index}", web::delete().to(delete_file))
             // API endpoint for fetching the list of files
             .route("/files", web::get().to(get_files))
+            .route("/search", web::get().to(search_files)) // Add the search endpoint
             // Serve static files from the "static" directory
             .service(Files::new("/", "./static").index_file("index.html"))
     })
