@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Processor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .buttons {
+            display: flex;
+            gap: 10px;
+        }
+        .buttons button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .search-bar {
+            flex-grow: 1;
+            margin: 0 20px;
+        }
+        .search-bar input {
+            width: 100%;
+            padding: 10px;
+            font-size: 16px;
+        }
+        .results {
+            margin-top: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background-color: #f4f4f4;
+        }
+        .delete-btn {
+            color: red;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+<div class="header">
+    <div class="buttons">
+        <button onclick="addExcel()">Add Excel</button>
+        <button onclick="addFolder()">Add Folder</button>
+        <button onclick="addZip()">Add Zip</button>
+    </div>
+    <div class="search-bar">
+        <input type="text" placeholder="Search..." oninput="filterFiles()">
+    </div>
+    <div>
+        <span>Nike</span>
+        <span>54,279 results</span>
+        <span>Puma</span>
+        <button onclick="replace()">Replace</button>
+    </div>
+</div>
+
+<div class="results">
+    <p>Total: <span id="total-files">5</span> files</p>
+    <table>
+        <thead>
+        <tr>
+            <th>#</th>
+            <th>File Name</th>
+            <th>Action</th>
+        </tr>
+        </thead>
+        <tbody id="file-table">
+        <tr>
+            <td>0</td>
+            <td>20240929-20240930.xlsx</td>
+            <td class="delete-btn" onclick="deleteFile(0)">Delete</td>
+        </tr>
+        <tr>
+            <td>1</td>
+            <td>20240922-20240928.xlsx</td>
+            <td class="delete-btn" onclick="deleteFile(1)">Delete</td>
+        </tr>
+        <tr>
+            <td>2</td>
+            <td>20240915-20240921.xlsx</td>
+            <td class="delete-btn" onclick="deleteFile(2)">Delete</td>
+        </tr>
+        <tr>
+            <td>3</td>
+            <td>20240908-20240914.xlsx</td>
+            <td class="delete-btn" onclick="deleteFile(3)">Delete</td>
+        </tr>
+        <tr>
+            <td>4</td>
+            <td>20240901-20240907.xlsx</td>
+            <td class="delete-btn" onclick="deleteFile(4)">Delete</td>
+        </tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+    // Function to add Excel files
+    function addExcel() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.xlsx, .xls';
+        input.multiple = true;
+        input.onchange = (e) => {
+            const files = e.target.files;
+            uploadFiles(files, 'excel');
+        };
+        input.click();
+    }
+
+    // Function to add a folder (as a ZIP file)
+    function addFolder() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.zip';
+        input.onchange = (e) => {
+            const files = e.target.files;
+            uploadFiles(files, 'folder');
+        };
+        input.click();
+    }
+
+    // Function to add a ZIP file
+    function addZip() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.zip';
+        input.onchange = (e) => {
+            const files = e.target.files;
+            uploadFiles(files, 'zip');
+        };
+        input.click();
+    }
+
+    // Function to upload files to the backend
+    async function uploadFiles(files, type) {
+        const formData = new FormData();
+        for (const file of files) {
+            formData.append('files', file);
+        }
+
+        try {
+            const response = await fetch('/upload', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (response.ok) {
+                alert(`${type} files uploaded successfully!`);
+                // Refresh the file list
+                fetchFiles();
+            } else {
+                alert('Error uploading files.');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('An error occurred while uploading files.');
+        }
+    }
+
+    // Function to delete a file
+    async function deleteFile(index) {
+        if (confirm('Are you sure you want to delete this file?')) {
+            try {
+                const response = await fetch(`/delete/${index}`, {
+                    method: 'DELETE',
+                });
+
+                if (response.ok) {
+                    alert('File deleted successfully!');
+                    // Refresh the file list
+                    fetchFiles();
+                } else {
+                    alert('Error deleting file.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('An error occurred while deleting the file.');
+            }
+        }
+    }
+
+    // Function to replace files
+    function replace() {
+        alert('Replace functionality');
+        // Implement the replace logic here
+    }
+
+    // Function to filter files based on search input
+    function filterFiles() {
+        const input = document.querySelector('.search-bar input');
+        const filter = input.value.toLowerCase();
+        const rows = document.querySelectorAll('#file-table tr');
+
+        rows.forEach((row) => {
+            const fileName = row.querySelector('td:nth-child(2)').textContent.toLowerCase();
+            if (fileName.includes(filter)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    }
+
+    // Function to fetch and display files from the backend
+    async function fetchFiles() {
+        try {
+            const response = await fetch('/files');
+            const files = await response.json();
+
+            const fileTable = document.getElementById('file-table');
+            fileTable.innerHTML = ''; // Clear the table
+
+            files.forEach((file, index) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                        <td>${index}</td>
+                        <td>${file.name}</td>
+                        <td class="delete-btn" onclick="deleteFile(${index})">Delete</td>
+                    `;
+                fileTable.appendChild(row);
+            });
+
+            // Update the total files count
+            document.getElementById('total-files').textContent = files.length;
+        } catch (error) {
+            console.error('Error:', error);
+            alert('An error occurred while fetching files.');
+        }
+    }
+
+    // Fetch files when the page loads
+    fetchFiles();
+</script>
+</body>
+</html>
