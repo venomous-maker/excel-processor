@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use chrono::{Local};
 use std::fs;
 use rayon::prelude::*; // Import Rayon parallel iterators
-use postcard::to_stdvec;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct SearchResult {
@@ -355,13 +354,7 @@ async fn get_files(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
         }
     }
 
-    match to_stdvec(&file_list) {
-        Ok(serialized) => Ok(HttpResponse::Ok()
-            .content_type("application/postcard")
-            .body(serialized)),
-        Err(e) => Ok(HttpResponse::InternalServerError().body(format!("Postcard serialization failed: {}", e))),
-    }
-    //Ok(HttpResponse::Ok().json(file_list))
+    Ok(HttpResponse::Ok().json(file_list))
 }
 
 // Corrected search_files function
