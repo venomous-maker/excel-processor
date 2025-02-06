@@ -24,11 +24,12 @@
             font-size: 16px;
             cursor: pointer;
         }
-        .search-bar {
+        .search-bar, .search-bar-query ,.replace-bar
+        {
             flex-grow: 1;
             margin: 0 20px;
         }
-        .search-bar input {
+        .search-bar input, .search-bar-query input,.replace-bar input{
             width: 100%;
             padding: 10px;
             font-size: 16px;
@@ -64,14 +65,19 @@
         <button onclick="addZip()">Add Zip</button>
     </div>
     <div class="search-bar">
-        <input type="text" placeholder="Search..." oninput="filterFiles()">
+        <input type="text" placeholder="Search file..." oninput="filterFiles()">
+    </div>
+    <div class="search-bar-query">
+        <input type="text" placeholder="Search word..." oninput="filterFiles()">
+    </div>
+    <div class="replace-bar">
+        <input type="text" placeholder="Replace word..." oninput="filterFiles()">
     </div>
     <div>
         <div class="buttons">
-            <button onclick="await search('Nike')">Nike</button>
+            <button onclick="search(getSearchWord())">Search Word</button>
             <span id="counter">0 results</span>
-            <button onclick="await search('Puma')">Puma</button>
-            <button onclick="replace()">Replace</button>
+            <button onclick="replace(getReplaceWord())">Replace Word</button>
         </div>
     </div>
 </div>
@@ -95,6 +101,14 @@
 <script>
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     let currentQuery = '';
+
+    function getSearchWord(){
+        return document.querySelector('.search-bar-query input').value;
+    }
+
+    function getReplaceWord(){
+        return document.querySelector('.replace-bar input').value;
+    }
     // Function to add Excel files
     function addExcel() {
         const input = document.createElement('input');
@@ -220,12 +234,11 @@
     }
 
     // Function to replace files
-    async function replace() {
+    async function replace(word) {
         // Implement the replace logic here
-
         if(confirm('Are you sure you want to replace the files?')){
             try {
-                const response = await fetch(`/replace?search=${currentQuery}&replace=${''}`, {
+                const response = await fetch(`/replace?search=${currentQuery}&replace=${word}`, {
                     method: 'GET',
                 });
 
